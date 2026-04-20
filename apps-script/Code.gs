@@ -2,18 +2,24 @@
  * 미담사진관 손님용 태블릿 웹 백엔드
  * Google Apps Script Web App - doGet/doPost JSON API
  *
- * v1.3.0 변경사항 (2026.04.20 3차 피드백):
+ * v1.4.0 변경사항 (2026.04.20 3차 피드백):
  * - SHEET_ID 정정 (운영 시트로 교체)
- * - 전화번호 검증 완화: 4 / 7 / 8 / 11 자리만 허용
+ * - 전화번호 검증: 정확히 4 / 7 / 8 / 11 자리만 허용 (그 외 거부)
  * - 전화번호 컬럼에 setNumberFormat('@') 강제 적용 (앞자리 0 누락 방지)
  * - updateEntry 저장 시에도 텍스트 서식 재적용
  * - verifyPhone 허용 길이 완화 (4/7/8/11)
+ * - 7자리(010+끝4자리) 하이픈 포맷 추가
+ * - 운영 유틸: applyTextFormatToPhoneColumn / diagnoseCorruptedPhones 추가
  *
- * v1.2.0 변경사항:
- * - appendRow 대신 ID 컬럼 기반 실제 마지막 데이터 행 탐색 후 직접 setValues
- *   (AppSheet가 빈 서식만 남긴 빈 행들 사이에 끼어드는 현상 해결)
- * - 한국 휴대폰 번호 엄격 검증 (010 + 11자리)
- * - 저장된 번호 11자리 아닌 경우 STORED_PHONE_CORRUPTED 에러 반환
+ * v1.3.0 변경사항 (2026.04.20 고객 피드백 2차):
+ * - 대기리스트 정렬 설정 추가 (SORT_ORDER: asc/desc 전환 가능)
+ * - 전화번호 검증 완화 (11자리 010 강제 -> 4자리 이상 허용)
+ * - 길이별 하이픈 자동 포맷 (4자리 그대로 / 8자리 0000-0000 / 11자리 010-0000-0000)
+ * - 인증 로직: 4자리 미만 저장된 번호만 CORRUPTED 처리
+ *
+ * v1.2.0 (이전):
+ * - appendRow 대신 findLastDataRow 기반 삽입 (AppSheet 빈 슬롯 호환)
+ * - 한국 휴대폰 11자리 엄격 검증 (-> 1.3.0에서 완화됨)
  */
 
 // ============================================================
@@ -24,7 +30,31 @@ const CONFIG = {
   SHEET_NAME: '미담_앱접수',
   API_TOKEN: 'midam-2026-secret-token',
   DEFAULT_STATUS: '촬영',
-  EXCLUDE_STATUS: ['완료', '취소']
+  EXCLUDE_STATUS: ['완료', '취소'],
+
+  // ==========================================================
+  // 대기리스트 정렬 설정 (SORT_ORDER)
+  // ==========================================================
+  //
+  // [고객 운영 맥락]
+  // 이 설정은 손님 태블릿 우측 "미담대기자" 리스트의 노출 순서를 제어합니다
+  //
+  //   1) 평상시 (대부분의 날): 'asc' - 오래된순
+  //      - 신규 손님이 하단에 노출됨
+  //      - 앱시트/구글시트와 시선 동선 일치 -> 관리자가 헷갈리지 않음
+  //      - 관리자는 아래쪽에서 최신 손님 확인
+  //
+  //   2) 성수기 (연 7일 정도, 대기 10명 넘는 날): 'desc' - 최신순
+  //      - 신규 손님이 상단에 노출됨
+  //      - 이름 입력 직후 본인 이름을 리스트 상단에서 즉시 확인 가능
+  //      - 대기가 길 때 손님 스크롤 부담 감소
+  //
+  // [전환 방법]
+  //   이 파일의 아래 SORT_ORDER 값을 'asc' <-> 'desc' 로 바꾸고
+  //   Apps Script 에디터에서 저장 후 [배포 관리 > 새 버전] 으로 재배포
+  //
+  SORT_ORDER: 'asc'
+  // SORT_ORDER: 'desc'   // 대기 10명 이상 성수기에 활성화
 }
 
 const COLUMNS = ['ID', '날짜', '상품', '상황', '이름', '전화번호', '이메일', '파일명', '인증키']
@@ -70,7 +100,7 @@ function handleRequest(e, method) {
       case 'update':
         return jsonResponse(updateEntry(params.id, params.data, params.last4))
       case 'ping':
-        return jsonResponse({ ok: true, version: '1.3.0', time: new Date().toISOString() })
+        return jsonResponse({ ok: true, version: '1.4.0', time: new Date().toISOString() })
       default:
         return jsonResponse({ ok: false, error: 'UNKNOWN_ACTION' })
     }
@@ -119,43 +149,55 @@ function getHeaderMap(sheet) {
 /**
  * ID 컬럼에 실제 값이 있는 마지막 행 번호를 반환 (1-based)
  * AppSheet가 남긴 빈 서식/포맷 행을 무시하고 실제 데이터 기준으로 판단
- *
- * 반환: 실제 데이터가 있는 마지막 행 번호 (없으면 1=헤더만 있음)
  */
 function findLastDataRow(sheet) {
   const lastRow = sheet.getLastRow()
-  if (lastRow < 2) return 1   // 헤더만 있거나 빈 시트
+  if (lastRow < 2) return 1
 
   const { map } = getHeaderMap(sheet)
   const idIdx = map['ID']
   if (idIdx === undefined) throw new Error('ID 컬럼을 찾을 수 없습니다')
 
-  // ID 컬럼 전체 값을 한 번에 읽어서 뒤에서부터 탐색 (성능)
   const idColValues = sheet.getRange(2, idIdx + 1, lastRow - 1, 1).getValues()
 
   for (let i = idColValues.length - 1; i >= 0; i--) {
     const value = String(idColValues[i][0] || '').trim()
     if (value !== '') {
-      return i + 2   // 0-index + 헤더(1행) 보정
+      return i + 2
     }
   }
-  return 1   // 모두 비어있음 - 헤더 다음 행부터 시작
+  return 1
 }
 
 // ============================================================
-// 전화번호 유효성 검증
+// 전화번호 유효성 검증 (v1.4.0 - 엄격화)
 // ============================================================
-
-/**
- * 전화번호 검증 - 4 / 7 / 8 / 11 자리만 허용
- *
- * 허용 케이스:
- * - 4자리: 끝번호만 ("1234")
- * - 7자리: 010 + 끝번호 4자리 ("0101234")
- * - 8자리: 중간+끝 ("12345678")
- * - 11자리: 010 + 전체 ("01012345678")
- */
-function validateFlexiblePhone(phone) {
+//
+// [고객 운영 맥락]
+// 미담사진관은 촬영 후 약 80% 손님이 나중에 사진을 찾으러 다시 방문합니다
+// 따라서 사진 완성 시 문자 발송을 위해 전화번호 입력이 필수입니다
+//
+// 파일명 규칙: "260420d2 홍길순1234.jpg" (날짜 + 일련번호 + 이름 + 전화 끝4자리)
+// 끝4자리는 동명이인 구분용 식별자로 사용됩니다
+//
+// 개인정보 민감 손님 대응 (약 5%)
+//   - "왜 개인정보를 다 알려줘야 하죠?" 하시는 손님
+//   - 이 경우 "끝번호 4자리만 입력해주세요" 안내
+//   - 4자리만 있어도 파일명 매칭 + 문자 수신 시 본인 확인 가능
+//
+// [검증 기준 - v1.4.0 3차 피드백 엄격화]
+//   - 정확히 4 / 7 / 8 / 11 자리만 허용
+//   - 7자리 / 11자리는 반드시 010으로 시작해야 함
+//   - 그 외 자릿수는 거부
+//   - 하이픈/공백 등은 자동으로 제거 후 길이 판정
+//
+// 허용 케이스:
+//   - 4자리: 끝번호만 ("1234") - 개인정보 민감 손님
+//   - 7자리: 010 + 끝번호 4자리 ("0101234")
+//   - 8자리: 중간+끝 ("12345678") - 010 생략 입력
+//   - 11자리: 010 + 전체 ("01012345678") - 풀 번호 입력
+//
+function validatePhoneFlexible(phone) {
   const digits = String(phone || '').replace(/\D/g, '')
 
   if (digits.length === 0) return { ok: false, error: 'PHONE_REQUIRED' }
@@ -174,25 +216,28 @@ function validateFlexiblePhone(phone) {
 }
 
 /**
- * 길이별 하이픈 자동 포맷 (저장용)
- * - 4자리:  "1234"        -> "1234"
- * - 7자리:  "0101234"     -> "010-1234"
- * - 8자리:  "12345678"    -> "1234-5678"
- * - 11자리: "01012345678" -> "010-1234-5678"
+ * 길이별 하이픈 자동 포맷
+ *
+ * [동작 규칙]
+ * - 4자리:  "5678"           -> "5678"           (그대로 - 개인정보 민감 손님)
+ * - 7자리:  "0101234"        -> "010-1234"       (010 + 끝번호 4자리)
+ * - 8자리:  "12345678"       -> "1234-5678"      (010 생략 입력)
+ * - 11자리: "01012345678"    -> "010-1234-5678"  (풀 번호 입력)
  */
-function normalizeFlexiblePhone(phone) {
+function formatPhoneByLength(phone) {
   const digits = String(phone || '').replace(/\D/g, '')
+  const len = digits.length
 
-  if (digits.length === 11) {
+  if (len === 11) {
     return digits.slice(0, 3) + '-' + digits.slice(3, 7) + '-' + digits.slice(7, 11)
   }
-  if (digits.length === 8) {
+  if (len === 8) {
     return digits.slice(0, 4) + '-' + digits.slice(4, 8)
   }
-  if (digits.length === 7) {
+  if (len === 7) {
     return digits.slice(0, 3) + '-' + digits.slice(3, 7)
   }
-  return digits  // 4자리는 그대로
+  return digits   // 4자리는 하이픈 없이 숫자만
 }
 
 // ============================================================
@@ -236,9 +281,21 @@ function listWaiting() {
     })
   }
 
-  list.reverse()
+  // ==========================================================
+  // 정렬 처리 (SORT_ORDER 설정에 따라 분기)
+  // ==========================================================
+  // asc  (평상시, 기본값) : 시트 순서 그대로 -> 신규 손님이 하단에 노출
+  //                        앱시트/구글시트와 동일한 시선 동선 유지
+  //
+  // desc (성수기 10명+)   : 역순 -> 신규 손님이 상단에 노출
+  //                        대기 많을 때 손님이 본인 이름을 즉시 확인
+  //
+  // * 운영 중 전환은 상단 CONFIG.SORT_ORDER 변경 + Apps Script 재배포
+  if (CONFIG.SORT_ORDER === 'desc') {
+    list.reverse()
+  }
 
-  return { ok: true, list: list, count: list.length }
+  return { ok: true, list: list, count: list.length, sortOrder: CONFIG.SORT_ORDER }
 }
 
 // ============================================================
@@ -256,10 +313,13 @@ function createEntry(data) {
 
   if (!name) return { ok: false, error: 'NAME_REQUIRED' }
 
-  const phoneCheck = validateFlexiblePhone(phone)
+  // 전화번호 검증 (v1.4.0: 정확히 4/7/8/11 자리만 허용)
+  // - 11자리 풀번호 / 8자리(010 생략) / 7자리(010+끝4자리) / 4자리(개인정보 민감) 허용
+  const phoneCheck = validatePhoneFlexible(phone)
   if (!phoneCheck.ok) return phoneCheck
 
-  const normalizedPhone = normalizeFlexiblePhone(phone)
+  // 길이별 자동 하이픈 포맷
+  const formattedPhone = formatPhoneByLength(phone)
 
   const lock = LockService.getScriptLock()
   try {
@@ -277,17 +337,15 @@ function createEntry(data) {
     if (map['상품'] !== undefined) newRow[map['상품']] = ''
     if (map['상황'] !== undefined) newRow[map['상황']] = CONFIG.DEFAULT_STATUS
     if (map['이름'] !== undefined) newRow[map['이름']] = name
-    if (map['전화번호'] !== undefined) newRow[map['전화번호']] = normalizedPhone
+    if (map['전화번호'] !== undefined) newRow[map['전화번호']] = formattedPhone
     if (map['이메일'] !== undefined) newRow[map['이메일']] = email
     if (map['파일명'] !== undefined) newRow[map['파일명']] = ''
     if (map['인증키'] !== undefined) newRow[map['인증키']] = ''
 
-    // appendRow 대신 실제 데이터 기준 다음 행에 직접 삽입
-    // (AppSheet가 남긴 빈 서식 행 무시)
     const targetRow = findLastDataRow(sheet) + 1
 
     // ⚠️ 반드시 setValues 호출 전에 텍스트 서식(@)을 지정해야 앞자리 0 보존됨
-    // - 전화번호 컬럼: 숫자로 해석되지 않도록 텍스트 강제 (수정 3 핵심)
+    // - 전화번호 컬럼: 숫자로 해석되지 않도록 텍스트 강제 (v1.4.0 수정 3 핵심)
     // - ID 컬럼: 영숫자 혼합 ID 안전 보존
     if (map['전화번호'] !== undefined) {
       sheet.getRange(targetRow, map['전화번호'] + 1).setNumberFormat('@')
@@ -310,7 +368,18 @@ function createEntry(data) {
 // ============================================================
 // 액션 3 - 전화번호 끝4자리 인증
 // ============================================================
-
+//
+// [인증 방식]
+// 저장된 전화번호에서 숫자만 추출한 뒤 끝 4자리를 입력값과 비교
+//
+// 예시
+//   - 저장: "010-1234-5678" -> 숫자: "01012345678" -> 끝4자리: "5678"
+//   - 저장: "1234-5678"     -> 숫자: "12345678"    -> 끝4자리: "5678"
+//   - 저장: "010-1234"      -> 숫자: "0101234"     -> 끝4자리: "1234"
+//   - 저장: "5678"          -> 숫자: "5678"        -> 끝4자리: "5678"
+//
+// * 4자리만 저장한 손님은 그 4자리가 곧 인증키가 됨
+//
 function verifyPhone(id, last4) {
   if (!id || !last4) return { ok: false, error: 'INVALID_PARAMS' }
 
@@ -322,16 +391,17 @@ function verifyPhone(id, last4) {
 
   const phoneDigits = String(row.data['전화번호'] || '').replace(/\D/g, '')
 
-  // 허용 길이: 4 / 7 / 8 / 11 (수정 2 정책 반영)
+  // 허용 길이: 4 / 7 / 8 / 11 (v1.4.0 정책 반영)
+  // 그 외는 레거시 데이터 or AppSheet 수동 입력 오류
   const allowedLengths = [4, 7, 8, 11]
   if (allowedLengths.indexOf(phoneDigits.length) === -1) {
     Logger.log('verifyPhone: 비정상 저장 번호 id=' + id + ' digits=[' + phoneDigits + '] length=' + phoneDigits.length)
     return { ok: false, error: 'STORED_PHONE_CORRUPTED', debug: phoneDigits.length }
   }
 
+  // 끝4자리 비교 (길이와 무관하게 뒤에서 4자리)
   // 4자리 저장 케이스는 번호 전체가 끝4자리
-  // 그 외 케이스는 마지막 4자리로 비교
-  const actualLast4 = phoneDigits.length === 4 ? phoneDigits : phoneDigits.slice(-4)
+  const actualLast4 = phoneDigits.slice(-4)
 
   if (actualLast4 !== last4Digits) {
     return { ok: false, error: 'LAST4_MISMATCH' }
@@ -353,16 +423,18 @@ function verifyPhone(id, last4) {
 function updateEntry(id, data, last4) {
   if (!id || !data || !last4) return { ok: false, error: 'INVALID_PARAMS' }
 
+  // 재인증 (인증 후 수정까지 사이의 위변조 방지)
   const verifyResult = verifyPhone(id, last4)
   if (!verifyResult.ok) return verifyResult
 
   const phone = sanitize(data.phone)
   const email = sanitize(data.email || '')
 
-  const phoneCheck = validateFlexiblePhone(phone)
+  // 신규 번호에도 동일한 검증 적용 (v1.4.0: 4/7/8/11 자리만 허용)
+  const phoneCheck = validatePhoneFlexible(phone)
   if (!phoneCheck.ok) return phoneCheck
 
-  const normalizedPhone = normalizeFlexiblePhone(phone)
+  const formattedPhone = formatPhoneByLength(phone)
 
   const lock = LockService.getScriptLock()
   try {
@@ -375,8 +447,8 @@ function updateEntry(id, data, last4) {
 
     if (map['전화번호'] !== undefined) {
       const phoneCell = sheet.getRange(row.rowIndex, map['전화번호'] + 1)
-      phoneCell.setNumberFormat('@')  // 수정 시에도 텍스트 서식 재적용 (수정 3 핵심)
-      phoneCell.setValue(normalizedPhone)
+      phoneCell.setNumberFormat('@')  // 수정 시에도 텍스트 서식 재적용 (v1.4.0 수정 3 핵심)
+      phoneCell.setValue(formattedPhone)
     }
     if (map['이메일'] !== undefined) {
       sheet.getRange(row.rowIndex, map['이메일'] + 1).setValue(email)
@@ -435,7 +507,7 @@ function sanitize(value) {
 }
 
 // ============================================================
-// 헬퍼 - AppSheet 호환 ID 생성
+// 헬퍼 - AppSheet 호환 ID 생성 (8자리 영숫자)
 // ============================================================
 
 function generateAppSheetCompatibleId() {
@@ -477,7 +549,7 @@ function dateToYYMMDD(date) {
 }
 
 // ============================================================
-// 개발/운영 유틸
+// 개발/운영 유틸 (테스트용)
 // ============================================================
 
 function testList() {
@@ -492,11 +564,45 @@ function testCreate() {
   }), null, 2))
 }
 
+function testCreateShortPhone() {
+  // 4자리만 입력 케이스 (개인정보 민감 손님 시나리오)
+  Logger.log(JSON.stringify(createEntry({
+    name: '4자리테스트',
+    phone: '5678',
+    email: ''
+  }), null, 2))
+}
+
+function testCreate8DigitPhone() {
+  // 8자리 입력 케이스 (010 생략)
+  Logger.log(JSON.stringify(createEntry({
+    name: '8자리테스트',
+    phone: '12345678',
+    email: ''
+  }), null, 2))
+}
+
+function testCreate7DigitPhone() {
+  // 7자리 입력 케이스 (010 + 끝4자리)
+  Logger.log(JSON.stringify(createEntry({
+    name: '7자리테스트',
+    phone: '0101234',
+    email: ''
+  }), null, 2))
+}
+
 function testFindLastDataRow() {
   const sheet = getSheet()
   const result = findLastDataRow(sheet)
   Logger.log('실제 마지막 데이터 행: ' + result)
   Logger.log('sheet.getLastRow(): ' + sheet.getLastRow())
+}
+
+function testSortOrder() {
+  Logger.log('현재 SORT_ORDER: ' + CONFIG.SORT_ORDER)
+  const result = listWaiting()
+  Logger.log('첫 번째 항목: ' + (result.list[0] ? result.list[0].name : 'none'))
+  Logger.log('마지막 항목: ' + (result.list[result.list.length - 1] ? result.list[result.list.length - 1].name : 'none'))
 }
 
 function testInspectRow() {
@@ -517,7 +623,7 @@ function testInspectRow() {
  * ⚠️ 1회성 실행 유틸 - 전화번호 컬럼 전체에 텍스트 서식(@) 적용
  *
  * 실행 시점:
- * - v1.3.0 배포 직후 1회 실행
+ * - v1.4.0 배포 직후 1회 실행 (이미 실행 완료됨)
  * - 이후 신규 등록분은 createEntry에서 자동 처리됨
  *
  * 동작:
@@ -558,7 +664,7 @@ function applyTextFormatToPhoneColumn() {
  * ⚠️ 진단 유틸 - 전화번호 컬럼에서 비정상 길이 데이터 탐지
  *
  * 출력: 숫자만 추출 시 4/7/8/11 외의 길이를 가진 행 전부
- * -> 이 행들은 v1.3.0 배포 전에 저장되어 앞자리 0이 사라진 것일 가능성 높음
+ * -> 이 행들은 v1.4.0 배포 전에 저장되어 앞자리 0이 사라진 것일 가능성 높음
  */
 function diagnoseCorruptedPhones() {
   const sheet = getSheet()
@@ -647,7 +753,6 @@ function cleanupEmptyRows() {
   const rowsToDelete = lastRow - lastDataRow
   Logger.log('삭제할 빈 행 수: ' + rowsToDelete + ' (' + (lastDataRow + 1) + '행~' + lastRow + '행)')
 
-  // 실제 삭제 (⚠️ 실행 시 되돌릴 수 없음)
   sheet.deleteRows(lastDataRow + 1, rowsToDelete)
 
   Logger.log('✅ 정리 완료. 새 getLastRow(): ' + sheet.getLastRow())
@@ -682,15 +787,13 @@ function compactEmptyRows() {
   const idIdx = map['ID']
   if (idIdx === undefined) throw new Error('ID 컬럼 없음')
 
-  // 전체 ID 컬럼 값 로드 (2행 ~ lastRow)
   const idValues = sheet.getRange(2, idIdx + 1, lastRow - 1, 1).getValues()
 
-  // 빈 행 번호 수집 (실제 시트 기준 1-based)
   const emptyRowNumbers = []
   for (let i = 0; i < idValues.length; i++) {
     const value = String(idValues[i][0] || '').trim()
     if (value === '') {
-      emptyRowNumbers.push(i + 2)   // 0-index + 헤더 보정
+      emptyRowNumbers.push(i + 2)
     }
   }
 
@@ -705,7 +808,6 @@ function compactEmptyRows() {
     return
   }
 
-  // 빈 행의 연속 구간 요약 (로그 가독성)
   Logger.log('')
   Logger.log('--- 빈 행 연속 구간 ---')
   let rangeStart = emptyRowNumbers[0]
@@ -728,14 +830,12 @@ function compactEmptyRows() {
     return
   }
 
-  // 실제 삭제 - 뒤에서부터 (앞에서 삭제하면 행 번호가 밀림)
   Logger.log('')
   Logger.log('=== 실제 삭제 시작 ===')
   const lock = LockService.getScriptLock()
   try {
     lock.waitLock(30000)
 
-    // 연속 구간으로 묶어서 삭제 (삭제 횟수 최소화)
     const ranges = []
     let s = emptyRowNumbers[0]
     let e = emptyRowNumbers[0]
@@ -750,7 +850,6 @@ function compactEmptyRows() {
     }
     ranges.push({ start: s, end: e })
 
-    // 뒤에서부터 삭제
     ranges.reverse()
     for (const r of ranges) {
       const count = r.end - r.start + 1
