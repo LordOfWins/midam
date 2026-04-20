@@ -1,6 +1,13 @@
 /**
  * 미담사진관 태블릿 웹 - 메인 로직 (프로덕션)
  *
+ * v1.4.0 (2026.04.20 고객 피드백 3차):
+ * - 전화번호 입력 기본값 "010-" 복원
+ * - 전화번호 검증 엄격화: 정확히 4 / 7 / 8 / 11 자리만 허용 (그 외 거부)
+ * - 7자리 하이픈 포맷 추가 (010-1234)
+ * - 실시간 포매팅에서 "010-" 프리필 보호
+ * - 에러 메시지 맵 보강
+ *
  * v1.3.0 (2026.04.20 고객 피드백 2차):
  * - 전화번호 검증 완화: 11자리 010 강제 -> 4자리 이상 허용
  * - 길이별 자동 하이픈 포맷 (4자리 그대로 / 8자리 0000-0000 / 11자리 010-0000-0000)
@@ -69,15 +76,26 @@
     return String(str || '').replace(/\D/g, '')
   }
 
-  // 전화번호 완화된 검증 - 최소 4자리 이상 숫자
-  function isValidPhoneFlexible(phone) {
+  // 허용 자릿수 (숫자만 추출 후 판단)
+  // - 4자리:  끝번호만 ("1234")
+  // - 7자리:  010 + 끝번호 4자리 ("0101234")
+  // - 8자리:  중간+끝 ("12345678")
+  // - 11자리: 010 + 전체 ("01012345678")
+  const ALLOWED_PHONE_LENGTHS = [4, 7, 8, 11]
+
+  // 전화번호 검증 - 4/7/8/11 자리만 허용
+  function isValidPhoneStrict(phone) {
     const digits = extractDigits(phone)
-    return digits.length >= 4
+    if (!ALLOWED_PHONE_LENGTHS.includes(digits.length)) return false
+    // 7자리 / 11자리는 반드시 010으로 시작
+    if ((digits.length === 7 || digits.length === 11) && !digits.startsWith('010')) return false
+    return true
   }
 
   /**
    * 길이별 하이픈 자동 포맷
    * - 4자리:  "5678"        -> "5678"
+   * - 7자리:  "0101234"     -> "010-1234"
    * - 8자리:  "12345678"    -> "1234-5678"
    * - 11자리: "01012345678" -> "010-1234-5678"
    * - 그 외:  숫자만 유지 (하이픈 없음)
@@ -93,6 +111,9 @@
     }
     if (len === 8) {
       return digits.slice(0, 4) + '-' + digits.slice(4, 8)
+    }
+    if (len === 7) {
+      return digits.slice(0, 3) + '-' + digits.slice(3, 7)
     }
     // 4자리 / 기타 길이는 하이픈 없이 숫자만
     return digits
@@ -241,7 +262,7 @@
 
     if (!name) { await showMessage('이름을 입력해주세요'); els.inputName.focus(); return }
     if (!phone) { await showMessage('전화번호를 입력해주세요'); els.inputPhone.focus(); return }
-    if (!isValidPhoneFlexible(phone)) {
+    if (!isValidPhoneStrict(phone)) {
       await showMessage('전화번호 8자리 또는 끝번호 4자리를 입력해주세요')
       els.inputPhone.focus()
       return
@@ -270,7 +291,7 @@
 
   function resetForm() {
     els.inputName.value = ''
-    els.inputPhone.value = ''
+    els.inputPhone.value = '010-'   // 기본값 복원 (3차 피드백)
     els.inputEmail.value = ''
   }
 
@@ -381,7 +402,7 @@
     const email = sanitizeInput(els.editEmail.value)
 
     if (!phone) { await showMessage('전화번호를 입력해주세요'); els.editPhone.focus(); return }
-    if (!isValidPhoneFlexible(phone)) {
+    if (!isValidPhoneStrict(phone)) {
       await showMessage('전화번호 8자리 또는 끝번호 4자리를 입력해주세요')
       els.editPhone.focus()
       return
@@ -419,6 +440,8 @@
       'NAME_REQUIRED': '이름을 입력해주세요',
       'PHONE_REQUIRED': '전화번호를 입력해주세요',
       'PHONE_TOO_SHORT': '전화번호는 4자리 이상이어야 합니다',
+      'PHONE_INVALID_LENGTH': '전화번호 8자리 또는 끝번호 4자리를 입력해주세요',
+      'PHONE_INVALID_PREFIX': '010으로 시작하는 번호를 입력해주세요',
       'LAST4_INVALID': '숫자 4자리를 입력해주세요',
       'LAST4_MISMATCH': '끝자리가 맞지 않습니다',
       'NOT_FOUND': '대상을 찾을 수 없습니다',
@@ -450,9 +473,19 @@
     els.btnCancel.addEventListener('click', resetForm)
 
     // 등록 폼 전화번호 자동 포매팅 (실시간 - 길이별 하이픈)
+    // "010-" 프리필 보호: 사용자가 직접 다 지우지 않는 한 "010-"은 유지
     els.inputPhone.addEventListener('input', (e) => {
       const cursorAtEnd = e.target.selectionStart === e.target.value.length
-      e.target.value = formatPhoneByLength(e.target.value)
+      const digits = extractDigits(e.target.value)
+
+      // 3자리 이하면서 010으로 시작하는 경우만 "010-" 유지
+      // (사용자가 010을 지우는 동작 존중)
+      if (digits.length <= 3 && digits === '010'.slice(0, digits.length) && digits.length > 0) {
+        e.target.value = digits === '010' ? '010-' : digits
+      } else {
+        e.target.value = formatPhoneByLength(e.target.value)
+      }
+
       if (cursorAtEnd) {
         const len = e.target.value.length
         e.target.setSelectionRange(len, len)

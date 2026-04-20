@@ -2,6 +2,13 @@
  * 미담사진관 손님용 태블릿 웹 백엔드
  * Google Apps Script Web App - doGet/doPost JSON API
  *
+ * v1.3.0 변경사항 (2026.04.20 3차 피드백):
+ * - SHEET_ID 정정 (운영 시트로 교체)
+ * - 전화번호 검증 완화: 4 / 7 / 8 / 11 자리만 허용
+ * - 전화번호 컬럼에 setNumberFormat('@') 강제 적용 (앞자리 0 누락 방지)
+ * - updateEntry 저장 시에도 텍스트 서식 재적용
+ * - verifyPhone 허용 길이 완화 (4/7/8/11)
+ *
  * v1.2.0 변경사항:
  * - appendRow 대신 ID 컬럼 기반 실제 마지막 데이터 행 탐색 후 직접 setValues
  *   (AppSheet가 빈 서식만 남긴 빈 행들 사이에 끼어드는 현상 해결)
@@ -13,7 +20,7 @@
 // 설정값
 // ============================================================
 const CONFIG = {
-  SHEET_ID: '1NodYqJ2xufeO2pJpeKAdeuXn5UNIca0I-1nWTatFPPc',
+  SHEET_ID: '11kcBZRYG1aqNn9qJEUqhHILy2sFTOSywZVOnUeLyi5k',
   SHEET_NAME: '미담_앱접수',
   API_TOKEN: 'midam-2026-secret-token',
   DEFAULT_STATUS: '촬영',
@@ -63,7 +70,7 @@ function handleRequest(e, method) {
       case 'update':
         return jsonResponse(updateEntry(params.id, params.data, params.last4))
       case 'ping':
-        return jsonResponse({ ok: true, version: '1.2.0', time: new Date().toISOString() })
+        return jsonResponse({ ok: true, version: '1.3.0', time: new Date().toISOString() })
       default:
         return jsonResponse({ ok: false, error: 'UNKNOWN_ACTION' })
     }
@@ -139,20 +146,53 @@ function findLastDataRow(sheet) {
 // 전화번호 유효성 검증
 // ============================================================
 
-function validateKoreanMobile(phone) {
+/**
+ * 전화번호 검증 - 4 / 7 / 8 / 11 자리만 허용
+ *
+ * 허용 케이스:
+ * - 4자리: 끝번호만 ("1234")
+ * - 7자리: 010 + 끝번호 4자리 ("0101234")
+ * - 8자리: 중간+끝 ("12345678")
+ * - 11자리: 010 + 전체 ("01012345678")
+ */
+function validateFlexiblePhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '')
 
   if (digits.length === 0) return { ok: false, error: 'PHONE_REQUIRED' }
-  if (digits.length !== 11) return { ok: false, error: 'PHONE_INVALID_LENGTH' }
-  if (!digits.startsWith('010')) return { ok: false, error: 'PHONE_INVALID_PREFIX' }
+
+  const allowed = [4, 7, 8, 11]
+  if (allowed.indexOf(digits.length) === -1) {
+    return { ok: false, error: 'PHONE_INVALID_LENGTH' }
+  }
+
+  // 7자리 / 11자리는 반드시 010으로 시작해야 함
+  if ((digits.length === 7 || digits.length === 11) && !digits.startsWith('010')) {
+    return { ok: false, error: 'PHONE_INVALID_PREFIX' }
+  }
 
   return { ok: true, digits: digits }
 }
 
-function normalizeKoreanMobile(phone) {
+/**
+ * 길이별 하이픈 자동 포맷 (저장용)
+ * - 4자리:  "1234"        -> "1234"
+ * - 7자리:  "0101234"     -> "010-1234"
+ * - 8자리:  "12345678"    -> "1234-5678"
+ * - 11자리: "01012345678" -> "010-1234-5678"
+ */
+function normalizeFlexiblePhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '')
-  if (digits.length !== 11) return phone
-  return digits.slice(0, 3) + '-' + digits.slice(3, 7) + '-' + digits.slice(7, 11)
+
+  if (digits.length === 11) {
+    return digits.slice(0, 3) + '-' + digits.slice(3, 7) + '-' + digits.slice(7, 11)
+  }
+  if (digits.length === 8) {
+    return digits.slice(0, 4) + '-' + digits.slice(4, 8)
+  }
+  if (digits.length === 7) {
+    return digits.slice(0, 3) + '-' + digits.slice(3, 7)
+  }
+  return digits  // 4자리는 그대로
 }
 
 // ============================================================
@@ -216,10 +256,10 @@ function createEntry(data) {
 
   if (!name) return { ok: false, error: 'NAME_REQUIRED' }
 
-  const phoneCheck = validateKoreanMobile(phone)
+  const phoneCheck = validateFlexiblePhone(phone)
   if (!phoneCheck.ok) return phoneCheck
 
-  const normalizedPhone = normalizeKoreanMobile(phone)
+  const normalizedPhone = normalizeFlexiblePhone(phone)
 
   const lock = LockService.getScriptLock()
   try {
@@ -245,6 +285,17 @@ function createEntry(data) {
     // appendRow 대신 실제 데이터 기준 다음 행에 직접 삽입
     // (AppSheet가 남긴 빈 서식 행 무시)
     const targetRow = findLastDataRow(sheet) + 1
+
+    // ⚠️ 반드시 setValues 호출 전에 텍스트 서식(@)을 지정해야 앞자리 0 보존됨
+    // - 전화번호 컬럼: 숫자로 해석되지 않도록 텍스트 강제 (수정 3 핵심)
+    // - ID 컬럼: 영숫자 혼합 ID 안전 보존
+    if (map['전화번호'] !== undefined) {
+      sheet.getRange(targetRow, map['전화번호'] + 1).setNumberFormat('@')
+    }
+    if (map['ID'] !== undefined) {
+      sheet.getRange(targetRow, map['ID'] + 1).setNumberFormat('@')
+    }
+
     sheet.getRange(targetRow, 1, 1, lastCol).setValues([newRow])
 
     return { ok: true, id: id, name: name, date: today, rowIndex: targetRow }
@@ -271,12 +322,16 @@ function verifyPhone(id, last4) {
 
   const phoneDigits = String(row.data['전화번호'] || '').replace(/\D/g, '')
 
-  if (phoneDigits.length !== 11) {
+  // 허용 길이: 4 / 7 / 8 / 11 (수정 2 정책 반영)
+  const allowedLengths = [4, 7, 8, 11]
+  if (allowedLengths.indexOf(phoneDigits.length) === -1) {
     Logger.log('verifyPhone: 비정상 저장 번호 id=' + id + ' digits=[' + phoneDigits + '] length=' + phoneDigits.length)
     return { ok: false, error: 'STORED_PHONE_CORRUPTED', debug: phoneDigits.length }
   }
 
-  const actualLast4 = phoneDigits.slice(-4)
+  // 4자리 저장 케이스는 번호 전체가 끝4자리
+  // 그 외 케이스는 마지막 4자리로 비교
+  const actualLast4 = phoneDigits.length === 4 ? phoneDigits : phoneDigits.slice(-4)
 
   if (actualLast4 !== last4Digits) {
     return { ok: false, error: 'LAST4_MISMATCH' }
@@ -304,10 +359,10 @@ function updateEntry(id, data, last4) {
   const phone = sanitize(data.phone)
   const email = sanitize(data.email || '')
 
-  const phoneCheck = validateKoreanMobile(phone)
+  const phoneCheck = validateFlexiblePhone(phone)
   if (!phoneCheck.ok) return phoneCheck
 
-  const normalizedPhone = normalizeKoreanMobile(phone)
+  const normalizedPhone = normalizeFlexiblePhone(phone)
 
   const lock = LockService.getScriptLock()
   try {
@@ -319,7 +374,9 @@ function updateEntry(id, data, last4) {
     if (!row) return { ok: false, error: 'NOT_FOUND' }
 
     if (map['전화번호'] !== undefined) {
-      sheet.getRange(row.rowIndex, map['전화번호'] + 1).setValue(normalizedPhone)
+      const phoneCell = sheet.getRange(row.rowIndex, map['전화번호'] + 1)
+      phoneCell.setNumberFormat('@')  // 수정 시에도 텍스트 서식 재적용 (수정 3 핵심)
+      phoneCell.setValue(normalizedPhone)
     }
     if (map['이메일'] !== undefined) {
       sheet.getRange(row.rowIndex, map['이메일'] + 1).setValue(email)
@@ -454,6 +511,112 @@ function testInspectRow() {
   const digits = String(row.data['전화번호'] || '').replace(/\D/g, '')
   Logger.log('숫자만: [' + digits + '] length=' + digits.length)
   Logger.log('끝4자리: [' + digits.slice(-4) + ']')
+}
+
+/**
+ * ⚠️ 1회성 실행 유틸 - 전화번호 컬럼 전체에 텍스트 서식(@) 적용
+ *
+ * 실행 시점:
+ * - v1.3.0 배포 직후 1회 실행
+ * - 이후 신규 등록분은 createEntry에서 자동 처리됨
+ *
+ * 동작:
+ * - 전화번호/ID 컬럼 전체(헤더 포함)에 setNumberFormat('@') 적용
+ * - 이미 저장된 값의 표시 방식이 텍스트로 바뀜
+ * - ⚠️ 이미 숫자로 저장되어 앞자리 0이 사라진 값은 복구되지 않음
+ *   -> 해당 행은 AppSheet나 시트에서 수동으로 하이픈 포함 형태로 재입력 필요
+ *
+ * 실행 방법:
+ * 1. Apps Script 에디터 함수 드롭다운 -> applyTextFormatToPhoneColumn 선택
+ * 2. 실행
+ * 3. 실행 로그(Ctrl+Enter)에서 결과 확인
+ */
+function applyTextFormatToPhoneColumn() {
+  const sheet = getSheet()
+  const { map } = getHeaderMap(sheet)
+  const maxRows = sheet.getMaxRows()
+
+  const targets = ['전화번호', 'ID']
+  const applied = []
+
+  for (const col of targets) {
+    const idx = map[col]
+    if (idx === undefined) {
+      Logger.log('⚠️ 컬럼 없음: ' + col)
+      continue
+    }
+    // 전체 컬럼(헤더 포함 ~ 시트 끝 행)에 텍스트 서식 적용
+    sheet.getRange(1, idx + 1, maxRows, 1).setNumberFormat('@')
+    applied.push(col + ' (컬럼 ' + (idx + 1) + ')')
+  }
+
+  Logger.log('✅ 텍스트 서식 적용 완료: ' + applied.join(', '))
+  Logger.log('⚠️ 이미 앞자리 0이 사라진 데이터는 수동 재입력 필요')
+}
+
+/**
+ * ⚠️ 진단 유틸 - 전화번호 컬럼에서 비정상 길이 데이터 탐지
+ *
+ * 출력: 숫자만 추출 시 4/7/8/11 외의 길이를 가진 행 전부
+ * -> 이 행들은 v1.3.0 배포 전에 저장되어 앞자리 0이 사라진 것일 가능성 높음
+ */
+function diagnoseCorruptedPhones() {
+  const sheet = getSheet()
+  const lastRow = sheet.getLastRow()
+  if (lastRow < 2) {
+    Logger.log('데이터 없음')
+    return
+  }
+
+  const { map, lastCol } = getHeaderMap(sheet)
+  const data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues()
+
+  const idIdx = map['ID']
+  const phoneIdx = map['전화번호']
+  const nameIdx = map['이름']
+
+  if (phoneIdx === undefined) {
+    Logger.log('전화번호 컬럼 없음')
+    return
+  }
+
+  const allowed = [4, 7, 8, 11]
+  const corrupted = []
+
+  for (let i = 0; i < data.length; i++) {
+    const rawPhone = String(data[i][phoneIdx] || '')
+    const digits = rawPhone.replace(/\D/g, '')
+
+    if (digits.length === 0) continue  // 빈 값은 무시
+    if (allowed.indexOf(digits.length) !== -1) continue  // 정상
+
+    corrupted.push({
+      rowIndex: i + 2,
+      id: String(data[i][idIdx] || ''),
+      name: String(data[i][nameIdx] || ''),
+      raw: rawPhone,
+      digits: digits,
+      length: digits.length
+    })
+  }
+
+  Logger.log('=== 비정상 전화번호 진단 결과 ===')
+  Logger.log('전체 검사 행: ' + data.length)
+  Logger.log('비정상 행: ' + corrupted.length)
+  Logger.log('')
+
+  if (corrupted.length === 0) {
+    Logger.log('✅ 모든 데이터 정상')
+    return
+  }
+
+  for (const c of corrupted) {
+    Logger.log('행 ' + c.rowIndex + ' | ID=' + c.id + ' | 이름=' + c.name +
+               ' | 원본=[' + c.raw + '] | 숫자=[' + c.digits + '] length=' + c.length)
+  }
+  Logger.log('')
+  Logger.log('⚠️ 위 행들은 AppSheet 또는 시트에서 수동 수정 필요')
+  Logger.log('   (앞자리 0이 이미 사라진 경우 원본 번호를 알 수 없음)')
 }
 
 /**
