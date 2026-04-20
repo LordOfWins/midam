@@ -10,7 +10,7 @@
 window.APP_CONFIG = {
   // Apps Script Web App 배포 URL
   // 배포 -> 새 배포 -> 웹 앱 생성 후 받은 URL
-  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbxm2nbvGjD3jFU7Z_mPm67D2VXG_e5gZWKDm6RoxTbJpqWMZoi-qUEZYNmn1ch8oMA2xQ/exec',
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbz7hsAG93IqpmCtpSekgdCxCPYz35BFNerj93nVDe_rOKoPT-OVm67JVkLaJTNLIIPRlA/exec',
 
   // Apps Script CONFIG.API_TOKEN과 반드시 동일 문자열
   API_TOKEN: 'midam-2026-secret-token',
