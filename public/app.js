@@ -84,13 +84,32 @@
   const ALLOWED_PHONE_LENGTHS = [4, 7, 8, 11]
 
   // 전화번호 검증 - 4/7/8/11 자리만 허용
-  function isValidPhoneStrict(phone) {
-    const digits = extractDigits(phone)
-    if (!ALLOWED_PHONE_LENGTHS.includes(digits.length)) return false
+  //function isValidPhoneStrict(phone) {
+ //   const digits = extractDigits(phone)
+ //   if (!ALLOWED_PHONE_LENGTHS.includes(digits.length)) return false
     // 7자리 / 11자리는 반드시 010으로 시작
-    if ((digits.length === 7 || digits.length === 11) && !digits.startsWith('010')) return false
-    return true
-  }
+ //   if ((digits.length === 7 || digits.length === 11) && !digits.startsWith('010')) return false
+ //   return true
+//  }
+
+ /* 84번 줄부터 수정 시작 */
+// 전화번호 검증 - 오직 010으로 시작하는 7자리 또는 11자리만 허용
+function isValidPhoneStrict(phone) {
+    const digits = extractDigits(phone);
+    const ALLOWED_PHONE_LENGTHS = [7, 11]; 
+
+    // 1. 자릿수 체크 (7자 또는 11자 아님 탈락)
+    if (!ALLOWED_PHONE_LENGTHS.includes(digits.length)) {
+        return false;
+    }
+
+    // 2. 무조건 '010'으로 시작하는지 체크
+    if (!digits.startsWith('010')) {
+        return false;
+    }
+
+    return true;
+}
 
   /**
    * 길이별 하이픈 자동 포맷
