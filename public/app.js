@@ -490,11 +490,7 @@ function isValidPhoneStrict(phone) {
 
     els.btnSubmit.addEventListener('click', handleSubmit)
     els.btnCancel.addEventListener('click', resetForm)
-  // 페이지 로딩 시 이름 입력칸에 자동으로 커서(포커스) 주기
-  setTimeout(() => {
-    if (els.inputName) els.inputName.focus();
-  }, 500);
-    
+
 
     // 등록 폼 전화번호 자동 포매팅 (실시간 - 길이별 하이픈)
     // "010-" 프리필 보호: 사용자가 직접 다 지우지 않는 한 "010-"은 유지
