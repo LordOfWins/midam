@@ -310,12 +310,14 @@ body.debug-border .form-group {
 }
 
 .btn-primary {
-  background: var(--color-navy);
+  /* --- background: var(--color-navy); ---*/
+  background: #d86c03;
   color: var(--color-white);
 }
 
 .btn-primary:active {
-  background: var(--color-navy-hover);
+  /*--- background: var(--color-navy-hover); ---*/
+  background: #d86c03;
 }
 
 .btn-secondary {
