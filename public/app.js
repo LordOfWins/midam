@@ -312,6 +312,10 @@ function isValidPhoneStrict(phone) {
     els.inputName.value = ''
     els.inputPhone.value = '010-'   // 기본값 복원 (3차 피드백)
     els.inputEmail.value = ''
+      // 등록 완료 후 다음 손님을 위해 이름 입력창에 자동으로 커서(포커스) 주기
+  setTimeout(() => {
+    if (els.inputName) els.inputName.focus();
+  }, 500);
   }
 
   // ============================================================
